@@ -1,90 +1,135 @@
 # Int8-Neural-Network-Inference-Engine
- a heap-free C++ int8 inference engine on an STM32F401 (Cortex-M4), targeting bit-exact agreement with PyTorch and benchmarking against CMSIS-NN kernels
 
+A from-scratch int8 neural network inference engine in C++ for Arm Cortex-M, built and benchmarked on an STM32 Nucleo-F401RE and measured against Arm's [CMSIS-NN](https://github.com/ARM-software/CMSIS-NN) on identical hardware.
 
+The goal is not to beat CMSIS-NN. It is to build a correct, tested first-principles implementation, then measure where and why a production library outperforms it, and document the reasons.
 
-A heap-free, zero-dependency C++17 INT8 inference engine implemented from scratch on the STM32F401 (ARM Cortex-M4). This project focuses on low-level microarchitectural optimizations, hardware-software co-design, and achieving 100% bit-exact numerical parity with PyTorch's quantization framework (`torch.ao`).
+## Status
 
-# int8-engine
+| Phase | Scope | State |
+|---|---|---|
+| 0 | Infrastructure: CMake build, CI, cycle counter, UART output, one fully-connected layer on hardware | In progress |
+| 1 | Correctness: reference operators, bit-exact against PyTorch | Planned |
+| 2 | Optimisation: Cortex-M4 DSP instructions, im2col, memory layout | Planned |
+| 3 | Benchmark against CMSIS-NN: latency, SRAM, flash | Planned |
+| 4 | Upstream contributions to CMSIS-NN found during benchmarking | Planned |
 
-A from-scratch int8 neural network inference engine in C++ for the Arm Cortex-M4F, benchmarked honestly against Arm's [CMSIS-NN](https://github.com/ARM-software/CMSIS-NN) on identical hardware.
+Each phase ends in something publishable. Results are added to this README only once the corresponding phase is complete.
 
-> **Status: Phase 0 (infrastructure). Nothing is benchmarked yet.** This README states what the project will do and how results will be measured. Results get added only when they exist.
+## Why this project
 
-## Goal
+Running a neural network on a microcontroller is a memory and cycle budgeting problem. Weights live in read-only flash, intermediate activations live in a small RAM, and every operator competes for both. Int8 quantisation cuts weight storage by 4x against float32 and lets the CPU do more multiply-accumulates per instruction, at the cost of precision that has to be managed carefully.
 
-Build a correct, tested int8 inference engine that runs a small convolutional network on an STM32, then measure where and why Arm's production library outperforms a careful first-principles implementation.
+This repository works through that problem end to end: define a quantisation scheme, implement the operators, prove they are correct, optimise them for the target CPU, and compare the result against the library the industry uses.
 
-**The goal is not to beat CMSIS-NN.** It is to understand the problem well enough to explain each performance gap precisely: which instruction, which memory access pattern, which layout decision.
-
-## Target hardware
+## Hardware
 
 | | |
 |---|---|
 | Board | STM32 Nucleo-F401RE |
 | Core | Arm Cortex-M4F, 84 MHz |
 | Memory | 512 KB flash, 96 KB SRAM |
-| Why this core | The DSP extension (`SMLAD`, `SMUAD`, `SXTB16`) lets one instruction do two 16-bit multiply-accumulates, which is what makes the optimisation phase meaningful. Cortex-M0/M3 cores do not have it. |
+| Notable features | DSP extension (SMLAD, SMUAD, SXTB16), single-precision FPU, no cache |
 
-## Design decisions
+The DSP extension is what makes Phase 2 meaningful. It performs two 16-bit multiply-accumulates in a single instruction.
 
-- **Hardcoded model topology.** No model parser or interpreter. Weights are exported from PyTorch as C headers (int8 arrays plus scales and zero-points). This keeps the engine small and the memory layout visible.
-- **Quantisation scheme:** per-tensor, symmetric int8 weights, asymmetric int8 activations, int32 accumulation, requantisation back to int8 with a fixed-point multiplier and shift (no division, no float on the hot path).
-- **Correctness is bit-exact.** Reference input/output pairs are generated on the host and every operator is tested against them, both on the host (CI) and on the board.
-- **Measurement uses the core's own cycle counter** (`DWT->CYCCNT`), not wall-clock time, so results do not depend on timer setup.
+## Toolchain
+
+- `arm-none-eabi-gcc` (Arm GNU Toolchain)
+- CMake and Ninja
+- OpenOCD or ST-Link tools for flashing
+- GitHub Actions for CI (firmware build and host-side unit tests)
+- PyTorch on the host for model definition, training, quantisation and reference output generation
+
+The build is CMake-based rather than IDE-based so that the same build runs locally and in CI.
 
 ## Models
 
 | Model | Purpose |
 |---|---|
-| Small CNN on a standard benchmark task (MNIST-scale, or the MLPerf Tiny keyword-spotting model) | Comparison against CMSIS-NN, using a model an outsider can reproduce |
-| IMU gesture classifier (MPU-6050) | Live end-to-end demo on the same engine |
+| Small CNN, MNIST-scale or the MLPerf Tiny keyword-spotting model | Benchmark model. Standard models allow comparison against published CMSIS-NN figures. |
+| IMU gesture classifier on an MPU-6050 | Demo model. Same engine with live sensor input. |
+
+Models are trained and quantised in PyTorch, then exported as C headers containing int8 weight arrays with per-tensor scale and zero-point values. Reference input/output pairs are exported alongside them for bit-exactness testing.
+
+## Quantisation scheme
+
+- Per-tensor quantisation
+- Symmetric int8 weights
+- Asymmetric int8 activations
+- int32 accumulation
+- Requantisation from int32 to int8 using a fixed-point multiplier and shift, avoiding division and floating point at inference time
 
 ## Operators
 
-`conv2d`, `depthwise_conv2d`, `fully_connected`, `relu` (clamp), `max_pool2d`, `softmax`.
+Implemented in Phase 1 as clear reference code, then optimised in Phase 2:
 
-## Roadmap
+- `conv2d`
+- `depthwise_conv2d`
+- `fully_connected`
+- `relu` (clamp)
+- `max_pool2d`
+- `softmax`
 
-Each phase ends in something that stands on its own.
+## Methodology
 
-- [ ] **Phase 0: Infrastructure.** CMake build with `arm-none-eabi-gcc`, CI on GitHub Actions, UART output, cycle counter, one fully-connected layer running on the board and printing a cycle count.
-- [ ] **Phase 1: Correctness.** Plain C++ reference operators, validated bit-exact against PyTorch outputs on hardware.
-- [ ] **Phase 2: Optimisation.** `SMLAD`-based MAC loops, `im2col`, memory layout and placement. Each change is measured and recorded, including the ones that did not help.
-- [ ] **Phase 3: Benchmark against CMSIS-NN.** Per-operator latency, peak SRAM, flash footprint, and a written explanation of each gap.
-- [ ] **Phase 4: Upstream.** Any documentation, test or correctness issues found in CMSIS-NN while benchmarking are reported or fixed upstream.
+Correctness and performance claims in this repository follow these rules.
 
-## Benchmark methodology (fixed in advance)
+- **Bit-exactness.** Every operator is tested against PyTorch reference outputs. A test passes only if the int8 outputs match exactly.
+- **Cycle counts.** Latency is measured in CPU cycles using the DWT cycle counter (`DWT->CYCCNT`), not wall-clock time.
+- **Like-for-like comparison.** The engine and CMSIS-NN are built with the same compiler, flags and optimisation level, run on the same board at the same clock, using the same model and weights.
+- **Memory.** Peak SRAM and flash footprint are reported separately.
+- **Reproducibility.** Build flags, compiler version and board configuration are recorded alongside every published result.
 
-- Same board, same compiler version, same optimisation flags for both implementations.
-- Same model weights and same inputs.
-- Cycles per operator and per full inference, taken from `DWT->CYCCNT`, median over repeated runs.
-- Peak SRAM and flash footprint reported from the linker map, not estimated.
-- Outputs of both implementations compared before any timing is trusted.
+## Scope
 
-## Explicitly out of scope (v1)
+In scope:
 
-Training infrastructure, float32/float16 support, architectures other than Cortex-M4/M7, a model parser, arbitrary model support, any GUI or web interface, and beating CMSIS-NN.
+- Cortex-M4 on the STM32F401RE
+- Hard-coded model topologies with generated weight headers
+- Int8 inference only
 
-## Planned repository layout
+Out of scope for v1:
+
+- Training infrastructure
+- Float32 or float16 inference
+- A model parser or interpreter
+- Support for arbitrary models
+- Other architectures
+- Beating CMSIS-NN
+
+## Repository layout
+
+Planned structure, populated phase by phase.
 
 ```
-include/    engine headers
-src/        operator implementations
-tests/      host-side unit tests (run in CI)
-firmware/   board bring-up, UART, cycle counter, linker script
-models/     PyTorch training/quantisation scripts, exported weights
-docs/       write-ups: quantisation maths, optimisation log, benchmark results
+.
+├── CMakeLists.txt
+├── cmake/              toolchain file for arm-none-eabi
+├── include/            public headers
+├── src/                operator implementations
+├── board/              startup code, linker script, UART, cycle counter
+├── tests/              host-side unit tests and reference vectors
+├── models/             PyTorch scripts, exported weight headers
+├── bench/              benchmark harness and recorded results
+├── docs/               design notes and write-ups
+└── .github/workflows/  CI
 ```
 
 ## Build
 
-Build instructions will be added when Phase 0 is complete. The build uses CMake and Ninja with `arm-none-eabi-gcc`, and CI runs the same build on every push.
+Build instructions will be added at the end of Phase 0.
 
-## Notes
+## Results
 
-This is a learning project. The write-ups in `docs/` aim to explain the reasoning behind each decision, not only record the outcome.
+Results will be published here after Phase 3, with the full methodology and raw numbers.
 
-## Licence
+## References
 
-To be decided before the first release.
+- [CMSIS-NN](https://github.com/ARM-software/CMSIS-NN), Arm's optimised neural network kernels for Cortex-M
+- [MLPerf Tiny](https://github.com/mlcommons/tiny), benchmark suite for ultra-low-power machine learning
+- Jacob et al., *Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference*, CVPR 2018
+
+## License
+
+To be added.
